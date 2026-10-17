@@ -54,6 +54,21 @@ python examples/catch_up.py ~/Drive gdrive: 2026-01-31T12:00:00+00:00 \
 
 The modules are `billspc.rclone`, `billspc.filters`, `billspc.consent`, `billspc.insync` and `billspc.scan`. Each docstring says what it guards against and why.
 
+### The environment rclone runs with
+
+Every program billspc starts gets an environment built from nothing, with only `HOME`, the user and locale variables and a short `PATH`. A variable you exported (an `RCLONE_*` override, a proxy) never reaches rclone.
+
+To choose the environment yourself, pass `env=` (a dict) to any function that starts a program. That dict is the whole environment the program gets, in place of the one billspc builds. `env=None`, the default, keeps the built one.
+
+- In `billspc.rclone` (`run`, `popen`, `installed_version` and `version_ok`) the `path` argument is not used when `env` is given. `RCLONE_CONFIG_PASS` is still added when you pass `config_password`. A dict that holds any `RCLONE_*` variable is refused before anything runs, because such a variable changes what rclone does outside the checked command line.
+- `popen` takes `env` as its own argument, so it never reaches `subprocess.Popen` through the other keyword arguments, which go to Popen unchanged.
+- In `billspc.consent` each function passes its `env` on to every program it starts (rclone, `ps` and `security`). `supervise` puts its no-open folder first on the `PATH` of the dict you give, so rclone still cannot open a browser. `spawn_command` does not use `keep` when `env` is given. A function you hand in (`spawn`, `owner_of`) gets no `env`, and `MacKeychain(env=...)` sets the environment of its own `security` calls.
+
+```python
+env = {"PATH": "/usr/bin:/bin", "HOME": "/path/to/home", "HTTPS_PROXY": "http://192.0.2.10:3128"}
+rclone.run(["about", "gdrive:", "--json"], config=cfg, password_command=cmd, env=env)
+```
+
 ## Claude Code
 
 billspc ships a Claude Code skill with the rules above and the details behind them. `billspc skill` prints it, and `billspc skill --install` copies it to `~/.claude/skills/billspc`.

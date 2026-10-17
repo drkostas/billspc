@@ -26,6 +26,7 @@ Install it with `pip install billspc`. It needs rclone 1.75.2 or newer (`billspc
 5. After a real copy, `rclone.copied(json_log)` says which files rclone wrote. A copy cut by its timeout still reports them (exit code 124).
 6. A config is always encrypted. Give `password_command`, or `config_password` (it reaches rclone as RCLONE_CONFIG_PASS for that one process, never on the command line).
 7. `check --combined <file>` may write only inside `rclone.REPORT_DIR`. Set it (a path, or a function that returns one) before you run a check with a report.
+8. To choose rclone's environment, pass `env=` (a dict) to `run`, `popen`, `installed_version` or `version_ok`. It replaces the environment billspc builds from nothing, and `path` is then not used. `RCLONE_CONFIG_PASS` is still added for `config_password`. A dict with any `RCLONE_*` variable is refused before anything runs, so pass a config password as `config_password`, never in `env`. `env=None` (the default) builds the environment as before.
 
 ```python
 from pathlib import Path
@@ -81,6 +82,7 @@ Or from the command line, `billspc consent gdrive` with a config file (see `exam
 - `open_page(remote, spawn=...)` starts a supervisor in its own process and waits for the page. `spawn_command(argv, log)` starts one in a session of its own, so `stop()` can end it whole.
 - Each pid in the page file is kept with its start time and executable. `stop()` and `end_leftovers()` signal a pid only while it is still that process, so a pid reused after a reboot is never signalled.
 - For your own bookkeeping, pass `still_wanted`, `on_end` and `on_stopped`. A callback that raises still leaves rclone ended, the port free and the result written.
+- Every function that starts a program takes `env`, the whole environment that program gets, and passes it on to each program it starts (rclone, `ps`, `security`). `env=None` keeps the environment each one builds. `supervise` keeps the shim folder first on the `PATH` you give. A function you hand in (`spawn`, `owner_of`, the callbacks) gets no `env`, so give your `spawn` its own, for example `spawn_command(argv, log, env=env)`. A password store sets its own, as `MacKeychain(env=env)`.
 
 A Google Cloud project's OAuth client of the "Desktop app" type works. While the app is in "Testing", Google ends its refresh tokens after seven days. In "Production" a token lasts until it is revoked or unused for six months.
 

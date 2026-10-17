@@ -30,6 +30,12 @@ the consent as failed, never with a guessed answer.
 A caller adds its own bookkeeping through callbacks: `on_page`, `still_wanted`, `on_end` and
 `on_stopped`. The page reader (`page_reader`, or `tabs` with `PageWatch`) decides from the browser
 whether Google says the app is blocked.
+
+Every function here that starts a program (rclone, `ps`, `security`, a supervisor) takes `env`, the
+whole environment that program gets. None (the default) keeps the environment each one builds for
+itself. A function that reaches others passes its `env` on to each of them. Callbacks and functions
+the caller hands in (`spawn`, `owner_of`, `on_end`, ...) are the caller's own and get no `env`, and a
+password store gets its programs' environment from its own constructor (`MacKeychain(env=...)`).
 """
 from __future__ import annotations
 
@@ -122,31 +128,39 @@ def load_client(source) -> tuple[str, str] | None:
 class MacKeychain:
     """The macOS login keychain as a password store. `has` reads an item's attributes only (no -w,
     so no value is read), and `add` passes the value to `security -i` on stdin, never on a command
-    line. `command(item)` is the password command rclone runs to read it."""
+    line. `command(item)` is the password command rclone runs to read it.
 
-    def __init__(self, account: str = "billspc", security: str = "/usr/bin/security"):
-        self.account, self.security = account, security
+    `env` is the whole environment `security` gets. The one given to `has` or `add` comes first,
+    then the one given here, and with neither the environment is built from nothing as before."""
+
+    def __init__(self, account: str = "billspc", security: str = "/usr/bin/security",
+                 env: dict[str, str] | None = None):
+        self.account, self.security, self.env = account, security, env
+
+    def _env(self, env: dict[str, str] | None) -> dict[str, str]:
+        given = env if env is not None else self.env
+        return dict(given) if given is not None else clean_env("/usr/bin:/bin")
 
     def command(self, item: str) -> str:
         return f"{self.security} find-generic-password -a {self.account} -s {item} -w"
 
-    def has(self, item: str) -> bool | None:
+    def has(self, item: str, env: dict[str, str] | None = None) -> bool | None:
         try:
             res = subprocess.run([self.security, "find-generic-password", "-a", self.account, "-s", item],
                                  capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL,
-                                 env=clean_env("/usr/bin:/bin"))
+                                 env=self._env(env))
         except (OSError, subprocess.SubprocessError):
             return None
         return True if res.returncode == 0 else (False if res.returncode == 44 else None)
 
-    def add(self, item: str, value: str) -> bool:
+    def add(self, item: str, value: str, env: dict[str, str] | None = None) -> bool:
         try:
             res = subprocess.run([self.security, "-i"], capture_output=True, text=True, timeout=15,
                                  input=f"add-generic-password -a {self.account} -s {item} -w {value}\n",
-                                 env=clean_env("/usr/bin:/bin"))
+                                 env=self._env(env))
         except (OSError, subprocess.SubprocessError):
             return False
-        return res.returncode == 0 and self.has(item) is True
+        return res.returncode == 0 and self.has(item, env=env) is True
 
 
 class FileStore:
@@ -170,17 +184,19 @@ class FileStore:
         return True
 
 
-def rc(r: Remote, args: list[str], **kw):
-    """One checked rclone command against this remote's encrypted config."""
-    return rclone.run(args, config=Path(r.config), password_command=r.password_command, **kw)
+def rc(r: Remote, args: list[str], *, env: dict[str, str] | None = None, **kw):
+    """One checked rclone command against this remote's encrypted config. `env` and the other `kw`
+    go to rclone.run."""
+    return rclone.run(args, config=Path(r.config), password_command=r.password_command, env=env, **kw)
 
 
-def remotes_in_config(r: Remote) -> list[str] | None:
-    res = rc(r, ["listremotes"])
+def remotes_in_config(r: Remote, env: dict[str, str] | None = None) -> list[str] | None:
+    res = rc(r, ["listremotes"], env=env)
     return [x.strip().rstrip(":") for x in res.stdout.splitlines() if x.strip()] if res.returncode == 0 else None
 
 
-def ensure_config(r: Remote, *, client: tuple[str, str] | None, store=None) -> dict:
+def ensure_config(r: Remote, *, client: tuple[str, str] | None, store=None,
+                  env: dict[str, str] | None = None) -> dict:
     """The remote's encrypted config, made when missing. {"ok", "steps", "why"}. Never prints a value.
 
     The steps, in order: the config's password kept in `store` (a random one, when the store lacks
@@ -201,55 +217,57 @@ def ensure_config(r: Remote, *, client: tuple[str, str] | None, store=None) -> d
             steps.append("password kept in the store")
     if not cfg.exists() or cfg.stat().st_size == 0:
         # rclone writes the file itself, encrypted and 0600, when it is not there
-        res = rc(r, ["config", "encryption", "set"])
+        res = rc(r, ["config", "encryption", "set"], env=env)
         if res.returncode != 0 or not cfg.exists():
             return {"ok": False, "steps": steps, "why": f"encrypting the empty config failed: {res.stderr.strip()[-160:]}"}
         os.chmod(cfg, 0o600)
         steps.append("config encrypted")
-    if rc(r, ["config", "encryption", "check"]).returncode != 0:
+    if rc(r, ["config", "encryption", "check"], env=env).returncode != 0:
         return {"ok": False, "steps": steps, "why": f"{cfg.name} is not encrypted, so nothing goes in it"}
-    names = remotes_in_config(r)
+    names = remotes_in_config(r, env)
     if names is None:
         return {"ok": False, "steps": steps, "why": "the config could not be opened"}
     if r.name not in names:
         if client is None:
             return {"ok": False, "steps": steps, "why": f"no OAuth client was given for {r.name}"}
         res = rc(r, ["config", "create", r.name, "drive", f"client_id={client[0]}",
-                     f"{SECRET_FIELD}={client[1]}", f"scope={r.scope}", "--non-interactive", "--no-output"])
-        if res.returncode != 0 or r.name not in (remotes_in_config(r) or []):
+                     f"{SECRET_FIELD}={client[1]}", f"scope={r.scope}", "--non-interactive", "--no-output"],
+                 env=env)
+        if res.returncode != 0 or r.name not in (remotes_in_config(r, env) or []):
             return {"ok": False, "steps": steps, "why": "rclone did not make the remote"}
         steps.append("remote made with its client")
     return {"ok": True, "steps": steps}
 
 
-def config_ok(r: Remote) -> bool:
+def config_ok(r: Remote, env: dict[str, str] | None = None) -> bool:
     """Whether the remote's config is whole: there, encrypted, and holding the remote. Reads only."""
     try:
         if not Path(r.config).exists() or Path(r.config).stat().st_size == 0:
             return False
     except OSError:
         return False
-    if rc(r, ["config", "encryption", "check"]).returncode != 0:
+    if rc(r, ["config", "encryption", "check"], env=env).returncode != 0:
         return False
-    return r.name in (remotes_in_config(r) or [])
+    return r.name in (remotes_in_config(r, env) or [])
 
 
-def has_token(r: Remote) -> bool | None:
+def has_token(r: Remote, env: dict[str, str] | None = None) -> bool | None:
     """Whether the remote holds a token, from rclone's redacted config (which shows it as XXX).
     None when the config could not be read."""
-    res = rc(r, ["config", "redacted", r.name])
+    res = rc(r, ["config", "redacted", r.name], env=env)
     if res.returncode != 0:
         return None
     return any(line.split("=", 1)[0].strip() == "token" for line in res.stdout.splitlines() if "=" in line)
 
 
-def discard_token(r: Remote, *, client: tuple[str, str] | None, store=None) -> dict:
+def discard_token(r: Remote, *, client: tuple[str, str] | None, store=None,
+                  env: dict[str, str] | None = None) -> dict:
     """Throw a token away without asking Google to revoke the grant (that would end the app's other
     grants too): the remote deleted from the config and made again, with its client and no token."""
-    res = rc(r, ["config", "delete", r.name])
+    res = rc(r, ["config", "delete", r.name], env=env)
     if res.returncode != 0:
         return {"ok": False, "why": "rclone did not delete the remote"}
-    return ensure_config(r, client=client, store=store)
+    return ensure_config(r, client=client, store=store, env=env)
 
 
 # ------------------------------------------------------------------------------------ processes
@@ -274,24 +292,25 @@ def alive(pid) -> bool:
     return True
 
 
-def proc_id(pid) -> str | None:
+def proc_id(pid, env: dict[str, str] | None = None) -> str | None:
     """A process's start time and executable as `ps -o lstart=,comm=` prints them, or None when no
     such process runs. Kept beside each pid, so a later signal can tell the same process from the
-    next program the pid was given to."""
+    next program the pid was given to. `env` is the whole environment `ps` gets."""
     if not pid:
         return None
+    child = dict(env) if env is not None else clean_env("/bin:/usr/bin")
     try:
         r = subprocess.run(["/bin/ps", "-o", "lstart=,comm=", "-p", str(int(pid))], capture_output=True,
-                           text=True, timeout=10, stdin=subprocess.DEVNULL, env=clean_env("/bin:/usr/bin"))
+                           text=True, timeout=10, stdin=subprocess.DEVNULL, env=child)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     got = " ".join(r.stdout.split()) if r.returncode == 0 else ""
     return got or None
 
 
-def ours(pid, ident: str | None) -> bool:
+def ours(pid, ident: str | None, env: dict[str, str] | None = None) -> bool:
     """Whether `pid` is still the very process `ident` names. A pid with no identity is never ours."""
-    return bool(pid and ident) and alive(pid) and proc_id(pid) == ident
+    return bool(pid and ident) and alive(pid) and proc_id(pid, env) == ident
 
 
 def shim(state_dir: Path) -> Path:
@@ -309,12 +328,13 @@ def shim(state_dir: Path) -> Path:
 
 # ------------------------------------------------------------------------------------ the page
 
-def port_holder(remotes: list[Remote] = (), port: int = PORT) -> str | None:
+def port_holder(remotes: list[Remote] = (), port: int = PORT,
+                env: dict[str, str] | None = None) -> str | None:
     """Who listens on the consent port: "ours" when the rclone of one of `remotes` does, "other"
     when something else answers (or holds it without answering), None when it is free."""
     for r in remotes:
         p = read_json(paths(r)["page"])
-        if ours(p.get("rclone"), p.get("rclone_id")):
+        if ours(p.get("rclone"), p.get("rclone_id"), env):
             return "ours"
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=1.0):
@@ -325,16 +345,16 @@ def port_holder(remotes: list[Remote] = (), port: int = PORT) -> str | None:
         return "other"
 
 
-def page(r: Remote, lifetime: float = LIFETIME_S) -> str | None:
+def page(r: Remote, lifetime: float = LIFETIME_S, env: dict[str, str] | None = None) -> str | None:
     """The address of this remote's consent page while its rclone runs, else None."""
     p = read_json(paths(r)["page"])
-    if (p.get("page") and ours(p.get("rclone"), p.get("rclone_id"))
+    if (p.get("page") and ours(p.get("rclone"), p.get("rclone_id"), env)
             and time.time() - float(p.get("at") or 0) < lifetime):
         return p["page"]
     return None
 
 
-def stop(r: Remote, *, own_pid: int | None = None) -> dict:
+def stop(r: Remote, *, own_pid: int | None = None, env: dict[str, str] | None = None) -> dict:
     """End this remote's consent: its rclone, and the supervisor's process group when the supervisor
     leads one of its own. Each only while its pid is still that process. The page file goes.
     {"ended": [...], "left": [...]}."""
@@ -343,7 +363,7 @@ def stop(r: Remote, *, own_pid: int | None = None) -> dict:
     ended, left = [], []
     rpid, spid = p.get("rclone"), p.get("supervisor")
     if rpid:
-        if ours(rpid, p.get("rclone_id")):
+        if ours(rpid, p.get("rclone_id"), env):
             try:
                 os.kill(int(rpid), signal.SIGTERM)
                 ended.append("rclone")
@@ -352,7 +372,7 @@ def stop(r: Remote, *, own_pid: int | None = None) -> dict:
         elif alive(rpid):
             left.append(f"pid {rpid} is no longer the consent's rclone, so it was left alone")
     if spid and spid != own_pid and spid != os.getpid():
-        if ours(spid, p.get("supervisor_id")) and p.get("group"):
+        if ours(spid, p.get("supervisor_id"), env) and p.get("group"):
             try:
                 group = os.getpgid(int(spid))
                 if group == int(spid) and group != os.getpgrp():
@@ -360,14 +380,15 @@ def stop(r: Remote, *, own_pid: int | None = None) -> dict:
                     ended.append("supervisor")
             except (ProcessLookupError, PermissionError):
                 pass
-        elif alive(spid) and not ours(spid, p.get("supervisor_id")):
+        elif alive(spid) and not ours(spid, p.get("supervisor_id"), env):
             left.append(f"pid {spid} is no longer the consent's supervisor, so it was left alone")
     pf.unlink(missing_ok=True)
     return {"ended": ended, "left": left}
 
 
 def end_leftovers(remotes: list[Remote], *, now: float | None = None, lifetime: float = LIFETIME_S,
-                  stopper: Optional[Callable[[Remote, str], object]] = None) -> dict:
+                  stopper: Optional[Callable[[Remote, str], object]] = None,
+                  env: dict[str, str] | None = None) -> dict:
     """End what a consent left behind with nothing else to end it. Run it now and then (and before
     each open), so the port is never held for good.
 
@@ -383,51 +404,58 @@ def end_leftovers(remotes: list[Remote], *, now: float | None = None, lifetime: 
         p = read_json(paths(r)["page"])
         if not p:
             continue
-        rclone_ours = ours(p.get("rclone"), p.get("rclone_id"))
-        super_ours = ours(p.get("supervisor"), p.get("supervisor_id"))
+        rclone_ours = ours(p.get("rclone"), p.get("rclone_id"), env)
+        super_ours = ours(p.get("supervisor"), p.get("supervisor_id"), env)
         if not rclone_ours and not super_ours:
             paths(r)["page"].unlink(missing_ok=True)
             out["stale"].append(r.name)
         elif rclone_ours and (not super_ours or now - float(p.get("at") or 0) > lifetime + 60):
             why = ("its supervisor is gone, so nothing answers rclone or checks the account"
                    if not super_ours else "its consent outlived its lifetime")
-            (stopper or (lambda rr, _w: stop(rr)))(r, why)
+            (stopper or (lambda rr, _w: stop(rr, env=env)))(r, why)
             out["ended"].append(r.name)
     return out
 
 
-def spawn_command(argv: list[str], log: Path, *, keep: tuple[str, ...] = ()) -> int:
+def spawn_command(argv: list[str], log: Path, *, keep: tuple[str, ...] = (),
+                  env: dict[str, str] | None = None) -> int:
     """Start a supervisor process in a session of its own (so stop() can end it whole), its output
     appended to `log`. Returns its pid. `argv` is the whole command, for example
-    [sys.executable, "-m", "billspc", "consent", "serve", "gdrive"]."""
+    [sys.executable, "-m", "billspc", "consent", "serve", "gdrive"].
+
+    `env` is the whole environment the supervisor gets. None builds one from nothing with the names
+    in `keep` carried over, and `keep` is not used when `env` is given."""
     log.parent.mkdir(parents=True, exist_ok=True)
+    child = dict(env) if env is not None else clean_env("/usr/bin:/bin", keep=keep)
     with open(log, "a") as out:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                             start_new_session=True, env=clean_env("/usr/bin:/bin", keep=keep))
+                             start_new_session=True, env=child)
     return p.pid
 
 
 def open_page(r: Remote, *, spawn: Callable[[Remote], int], client: tuple[str, str] | None = None,
               store=None, remotes: list[Remote] = (), before_spawn: Optional[Callable[[], None]] = None,
-              sleep=time.sleep, wait_s: int = WAIT_S) -> dict:
+              sleep=time.sleep, wait_s: int = WAIT_S, env: dict[str, str] | None = None) -> dict:
     """The consent page for this remote: the running one, or a new one.
 
     {"outcome": "running" | "queued" | "success" | "failure", "page", "why", "pid", "steps"}.
     "queued" when another consent of `remotes` holds the port. "failure" with why when something
     else holds the port, the config cannot be made, or the page does not come up in `wait_s`.
     `before_spawn` runs just before the supervisor starts: from that moment the token may change,
-    whatever the consent ends as."""
-    running = page(r)
+    whatever the consent ends as. `env` goes to every program this starts itself (rclone, `ps`).
+    `spawn` is the caller's own and starts the supervisor with whatever environment it chooses, for
+    example through spawn_command(..., env=...)."""
+    running = page(r, env=env)
     if running:
         return {"outcome": "running", "page": running}
-    end_leftovers([r, *remotes])
-    holder = port_holder([r, *remotes])
+    end_leftovers([r, *remotes], env=env)
+    holder = port_holder([r, *remotes], env=env)
     if holder == "ours":
         return {"outcome": "queued", "page": None,
                 "why": "another consent holds rclone's port, so this one waits for it to end"}
     if holder == "other":
         return {"outcome": "failure", "page": None, "why": f"something else holds port {PORT}"}
-    cfg = ensure_config(r, client=client, store=store)
+    cfg = ensure_config(r, client=client, store=store, env=env)
     if not cfg["ok"]:
         return {"outcome": "failure", "page": None, "why": cfg["why"], "steps": cfg["steps"]}
     pp = paths(r)
@@ -555,14 +583,14 @@ def answer_for(question: str | None, answers=None) -> str | None:
 
 # ------------------------------------------------------------------------------------ the account
 
-def owner_of_probe(r: Remote) -> str | None:
+def owner_of_probe(r: Remote, env: dict[str, str] | None = None) -> str | None:
     """Make a probe file at the top of My Drive, read its owner from Drive's metadata, send it to
     the trash. The owner, or None when any step did not answer. This reaches Google."""
     target = f"{r.name}:{rclone.PROBE_PREFIX}{secrets.token_hex(6)}"
-    if rc(r, ["touch", target], timeout=60).returncode != 0:
+    if rc(r, ["touch", target], timeout=60, env=env).returncode != 0:
         return None
     try:
-        res = rc(r, ["lsjson", "--stat", "--metadata", target], timeout=60)
+        res = rc(r, ["lsjson", "--stat", "--metadata", target], timeout=60, env=env)
         try:
             meta = (json.loads(res.stdout or "{}") or {}).get("Metadata") or {}
         except ValueError:
@@ -570,23 +598,25 @@ def owner_of_probe(r: Remote) -> str | None:
         owner = meta.get("owner")
         return owner if isinstance(owner, str) and "@" in owner else None
     finally:
-        rc(r, ["deletefile", target], timeout=60)
+        rc(r, ["deletefile", target], timeout=60, env=env)
 
 
 def check_account(r: Remote, *, owner_of: Optional[Callable[[Remote], str | None]] = None,
-                  client: tuple[str, str] | None = None, store=None) -> dict:
+                  client: tuple[str, str] | None = None, store=None,
+                  env: dict[str, str] | None = None) -> dict:
     """Whose is the token this remote holds?
 
     {"outcome": "success", "account"} when it is r.account's (or any account, when r.account is
     None). {"outcome": "failure", "account", "discarded"} for anyone else's: the token is discarded
     at once, so nothing can use it. {"outcome": "unknown"} when the probe got no answer: nothing is
-    changed, and the caller should check again later. `owner_of` replaces the probe (for tests)."""
-    owner = (owner_of or owner_of_probe)(r)
+    changed, and the caller should check again later. `owner_of` replaces the probe (for tests) and
+    gets only the remote. `env` goes to the probe and to the discard."""
+    owner = owner_of(r) if owner_of is not None else owner_of_probe(r, env)
     if owner is None:
         return {"outcome": "unknown", "why": "the probe file's owner could not be read"}
     if r.account is None or owner.casefold() == r.account.casefold():
         return {"outcome": "success", "account": owner}
-    d = discard_token(r, client=client, store=store)
+    d = discard_token(r, client=client, store=store, env=env)
     return {"outcome": "failure", "account": owner, "discarded": d.get("ok"),
             "why": f"the token was {owner}'s, not {r.account}'s, so it was discarded"}
 
@@ -602,7 +632,7 @@ def supervise(r: Remote, *, page_reader: Optional[Callable[[], str | None]] = No
               owner_of: Optional[Callable[[Remote], str | None]] = None,
               client: tuple[str, str] | None = None, store=None, answers=None,
               lifetime: float = LIFETIME_S, poll: float = POLL_S, task_poll: float = TASK_POLL_S,
-              quiet: float = 0.5, clock=time.monotonic) -> dict:
+              quiet: float = 0.5, clock=time.monotonic, env: dict[str, str] | None = None) -> dict:
     """Run one consent to its end and return its result, which is also written to the result file:
 
         {"outcome": consented | declined | blocked | failed | timed out | ended,
@@ -617,13 +647,23 @@ def supervise(r: Remote, *, page_reader: Optional[Callable[[], str | None]] = No
       remote holds now, whatever the ending (rclone saves a new token before its last question).
       An exception there is kept in result["recorded"]
     - `on_stopped(why)` then runs unless a stopper already took the page file away (default stop())
+    - `env` goes to every program this starts itself: rclone's reconnect, `ps`, and the account
+      check. rclone's reconnect gets it with the folder from shim() put first on its PATH, so rclone
+      still cannot open a browser. None keeps the environment each one builds for itself
 
     Whatever ends it, rclone ends with it: the loop is inside try/finally, so even a callback that
     raises still ends rclone, frees the port and writes the result before the exception goes on."""
     pp = paths(r)
-    p = rclone.popen(["config", "reconnect", f"{r.name}:"], config=Path(r.config),
-                     password_command=r.password_command, path=f"{shim(r.state_dir)}:{rclone.PATH}")
-    rclone_id = proc_id(p.pid)
+    no_open = shim(r.state_dir)
+    if env is None:
+        p = rclone.popen(["config", "reconnect", f"{r.name}:"], config=Path(r.config),
+                         password_command=r.password_command, path=f"{no_open}:{rclone.PATH}")
+    else:
+        given_path = env.get("PATH")
+        p = rclone.popen(["config", "reconnect", f"{r.name}:"], config=Path(r.config),
+                         password_command=r.password_command,
+                         env={**env, "PATH": f"{no_open}:{given_path}" if given_path else str(no_open)})
+    rclone_id = proc_id(p.pid, env)
     fd = p.stdout.fileno()
     text, buf, page_url, outcome, note = "", "", None, None, ""
     reader = page_reader
@@ -643,7 +683,7 @@ def supervise(r: Remote, *, page_reader: Optional[Callable[[], str | None]] = No
                 if m and not page_url:
                     page_url = m.group(0)
                     write_json(pp["page"], {"page": page_url, "rclone": p.pid, "rclone_id": rclone_id,
-                                            "supervisor": os.getpid(), "supervisor_id": proc_id(os.getpid()),
+                                            "supervisor": os.getpid(), "supervisor_id": proc_id(os.getpid(), env),
                                             "group": os.getpgid(0) == os.getpid(), "at": time.time(),
                                             "remote": r.name})
                     if reader is None and tabs is not None:
@@ -706,14 +746,14 @@ def supervise(r: Remote, *, page_reader: Optional[Callable[[], str | None]] = No
         try:
             if on_end is not None:
                 on_end(result)
-            elif has_token(r):
-                result["account"] = check_account(r, owner_of=owner_of, client=client, store=store)
+            elif has_token(r, env):
+                result["account"] = check_account(r, owner_of=owner_of, client=client, store=store, env=env)
         except Exception as e:  # noqa: BLE001 - kept in the result; rclone has ended above
             result["recorded"] = f"{type(e).__name__}: {str(e)[:200]}"
         write_json(pp["result"], result)
         if page_url is None or pp["page"].exists():
             try:
-                (on_stopped or (lambda _why: stop(r, own_pid=os.getpid())))(f"the consent ended: {outcome}")
+                (on_stopped or (lambda _why: stop(r, own_pid=os.getpid(), env=env)))(f"the consent ended: {outcome}")
             except Exception:  # noqa: BLE001 - rclone has ended; only the bookkeeping failed
                 pp["page"].unlink(missing_ok=True)
     return result
