@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.9", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.13"
+    env:
+      RCLONE_VERSION: "1.75.2"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install rclone
+        run: |
+          case "$RUNNER_OS" in
+            Linux) platform=linux-amd64 ;;
+            macOS) platform=osx-arm64 ;;
+          esac
+          curl -fsSL -o rclone.zip "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-${platform}.zip"
+          unzip -q rclone.zip
+          sudo install "rclone-v${RCLONE_VERSION}-${platform}/rclone" /usr/local/bin/rclone
+          rclone version
+      - run: pip install -e '.[test]'
+      - run: python -m compileall -q src
+      - run: pytest -q
