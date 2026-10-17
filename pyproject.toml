@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "billspc"
+version = "0.1.0"
+description = "rclone-backed Google Drive sync and backup for a Mac: an allowlist before every rclone command, filter files, a supervised Google consent, an Insync migration and a changed-files scan"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "Konstantinos Georgiou" }]
+dependencies = ["tomli>=2; python_version < '3.11'"]
+keywords = ["rclone", "google-drive", "sync", "backup", "bisync", "insync", "oauth", "macos"]
+classifiers = ["Programming Language :: Python :: 3", "Operating System :: MacOS", "Topic :: System :: Archiving :: Backup"]
+
+[project.urls]
+Homepage = "https://github.com/drkostas/billspc"
+
+[project.scripts]
+billspc = "billspc.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+billspc = ["skill/SKILL.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
