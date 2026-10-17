@@ -1,0 +1,40 @@
+# billspc configuration. Copy to ~/.config/billspc/config.toml (or point BILLSPC_CONFIG at it).
+# Paths may start with ~.
+
+[billspc]
+# where listings, consent pages, results and check reports are kept (private files)
+state_dir = "~/.local/state/billspc"
+# where each rclone config's password is kept: "keychain" (the macOS login keychain) or "files"
+# (one private file per password, in password_dir)
+password_store = "keychain"
+keychain_account = "billspc"
+# password_dir = "~/.config/billspc/passwords"
+
+[rclone]
+# the rclone to run (default: the one on the PATH, then the usual install places)
+# binary = "/opt/homebrew/bin/rclone"
+# what rclone and its password command may find
+path = "/usr/bin:/bin"
+
+# One section per Google Drive remote. Each lives in its own encrypted rclone config.
+[remotes.gdrive]
+config = "~/.config/billspc/rclone/gdrive.conf"
+# "drive" for the whole Drive, "drive.file" for the files this app made only
+scope = "drive"
+# the Google account the token must belong to. A token for any other account is discarded
+account = "you@example.org"
+# the OAuth client of a Google Cloud project, as Google's JSON download ("Desktop app" type)
+client_file = "~/.config/billspc/client.json"
+# the password item's name in the store (default: billspc-<remote>)
+# password_item = "billspc-gdrive"
+
+# One section per local folder that syncs.
+[folders.drive]
+path = "~/Drive"
+remote = "gdrive"
+# ignore patterns, one per line (for example the ones `billspc insync rules` wrote out)
+# ignore_file = "~/.config/billspc/ignore.txt"
+# keep only these folders (selective sync). Leave it out to keep everything
+# include = ["Documents", "Projects"]
+# paths from the folder's top that are never copied, besides the built-in list
+# never = ["Projects/app/live.db"]
