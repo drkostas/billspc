@@ -31,6 +31,13 @@ RCLONE_CONFIG_PASS set for that one process when the caller hands the password i
 never on the command line. The environment is built from nothing (no RCLONE_* variable the caller
 exported reaches rclone), so nothing outside the command line can point a remote elsewhere.
 
+A caller that needs to choose the environment itself passes `env=` to `run`, `popen`,
+`installed_version` or `version_ok`. That dict is then the whole environment rclone gets, in place of
+the one built here, and `path` is not used. Two things still hold. RCLONE_CONFIG_PASS is added to it
+when `config_password` is given, and a dict that carries any RCLONE_* variable is refused before
+anything runs, since such a variable could point a remote elsewhere outside the checked command line.
+`env=None` (the default) builds the environment as before.
+
 One secret does cross a command line once. `config create` takes the OAuth client's secret as an
 argument (rclone saves option values only from arguments). Google treats a desktop client's secret
 as not confidential, since it ships inside every installed app. The token, the real key, never
@@ -335,10 +342,31 @@ def env(path: str = PATH, config_password: str | None = None) -> dict[str, str]:
     return clean_env(path, add={"RCLONE_CONFIG_PASS": config_password} if config_password else None)
 
 
+def child_env(given: dict[str, str] | None, path: str = PATH,
+              config_password: str | None = None) -> dict[str, str]:
+    """The environment one rclone process gets. With `given` None it is env(path, config_password).
+    Otherwise it is a copy of `given`, with RCLONE_CONFIG_PASS added when `config_password` is set.
+    `path` is not used then. A `given` that carries any RCLONE_* variable is refused."""
+    if given is None:
+        return env(path, config_password)
+    bad = sorted(k for k in given if k.upper().startswith("RCLONE_"))
+    if bad:
+        raise Refused(f"an environment for rclone may not carry {', '.join(bad)}: an RCLONE_* variable "
+                      "changes what rclone does outside the checked command line (a config password "
+                      "goes through config_password)")
+    out = dict(given)
+    if config_password:
+        out["RCLONE_CONFIG_PASS"] = config_password
+    return out
+
+
 def run(args: list[str], *, config: Path | None, password_command: str | None,
         timeout: float = 120, stdin_text: str | None = None, path: str = PATH,
-        config_password: str | None = None, rclone: str | None = None) -> subprocess.CompletedProcess:
+        config_password: str | None = None, rclone: str | None = None,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run one checked rclone command and wait for it.
+
+    `env` is the whole environment rclone gets (see child_env). None builds it from `path`.
 
     A command that cannot start or runs past its timeout comes back as a failed CompletedProcess
     (127 or 124), never as an exception. A command past its timeout keeps what it said: it is sent
@@ -348,10 +376,10 @@ def run(args: list[str], *, config: Path | None, password_command: str | None,
     cmd = argv(args, config=config, password_command=password_command,
                config_password=config_password, rclone=rclone)
     shown = redacted(cmd)
+    child = child_env(env, path, config_password)
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                env=env(path, config_password))
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=child)
     except OSError as e:
         return subprocess.CompletedProcess(shown, 127, "", str(e))
     try:
@@ -371,22 +399,28 @@ def run(args: list[str], *, config: Path | None, password_command: str | None,
 
 def popen(args: list[str], *, config: Path | None, password_command: str | None,
           path: str = PATH, config_password: str | None = None, rclone: str | None = None,
-          **kw) -> subprocess.Popen:
+          env: dict[str, str] | None = None, **kw) -> subprocess.Popen:
     """Start one checked rclone command that keeps running (the consent's reconnect), with stdin and
-    stdout pipes for the caller to answer its questions on. stderr goes to stdout."""
+    stdout pipes for the caller to answer its questions on. stderr goes to stdout.
+
+    `env` is the whole environment rclone gets, in place of the one built from `path`, exactly as in
+    run() (see child_env). It is a named argument of popen, so it never reaches Popen through `kw`.
+    The other `kw` go to Popen unchanged."""
     cmd = argv(args, config=config, password_command=password_command,
                config_password=config_password, rclone=rclone)
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, env=env(path, config_password), **kw)
+                            stderr=subprocess.STDOUT, env=child_env(env, path, config_password), **kw)
 
 
 # ------------------------------------------------------------------------------------ the version
 
-def installed_version(rclone: str | None = None) -> str | None:
-    """The installed rclone's version as "1.75.2", or None when it does not run."""
+def installed_version(rclone: str | None = None, env: dict[str, str] | None = None) -> str | None:
+    """The installed rclone's version as "1.75.2", or None when it does not run. `env` is the whole
+    environment rclone gets (see child_env), None builds it."""
+    child = child_env(env)
     try:
         r = subprocess.run([rclone or binary(), "version"], capture_output=True, text=True, timeout=30,
-                           stdin=subprocess.DEVNULL, env=env())
+                           stdin=subprocess.DEVNULL, env=child)
     except (OSError, subprocess.SubprocessError):
         return None
     m = re.search(r"rclone v(\d+(?:\.\d+)*)", r.stdout or "")
@@ -397,11 +431,12 @@ def _parts(v: str) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", v))
 
 
-def version_ok(minimum: str = VERSION, rclone: str | None = None) -> tuple[bool, str | None]:
+def version_ok(minimum: str = VERSION, rclone: str | None = None,
+               env: dict[str, str] | None = None) -> tuple[bool, str | None]:
     """(whether the installed rclone is at least `minimum`, its version). An rclone that does not run
     is never ok. The allowlist and the plan checks were measured on VERSION, so a newer one is
-    accepted and an older one is not."""
-    got = installed_version(rclone)
+    accepted and an older one is not. `env` goes to installed_version."""
+    got = installed_version(rclone, env=env)
     return (got is not None and _parts(got) >= _parts(minimum)), got
 
 

@@ -214,11 +214,11 @@ def test_json_log_reads_objects_only():
 
 
 def test_version_comparison(monkeypatch):
-    monkeypatch.setattr(rclone, "installed_version", lambda rclone=None: "1.75.2")
+    monkeypatch.setattr(rclone, "installed_version", lambda rclone=None, env=None: "1.75.2")
     assert rclone.version_ok("1.75.2") == (True, "1.75.2")
     assert rclone.version_ok("1.80") == (False, "1.75.2")
     assert rclone.version_ok("1.9") == (True, "1.75.2")
-    monkeypatch.setattr(rclone, "installed_version", lambda rclone=None: None)
+    monkeypatch.setattr(rclone, "installed_version", lambda rclone=None, env=None: None)
     assert rclone.version_ok() == (False, None)
 
 
