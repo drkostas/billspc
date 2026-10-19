@@ -172,6 +172,15 @@ def changed_since(root: Path, since: datetime, *, exclude: Optional[Exclude] = N
                 # the change the listing counts from: the content's, else the move's (only ctime
                 # says it), else the move of a folder above it
                 at = (st.st_mtime if st.st_mtime > cut else st.st_ctime) if own else moved_at
+                # a copy that kept its source's time (cp -p, rsync -t, an unpacked archive) first held
+                # this content at this path when it was made. macOS moves its birth back with the
+                # mtime, so only its date added says so (asked only when its ctime is later than its
+                # mtime, which a plain write never leaves). Counted from the mtime, a backup made
+                # today of a file changed three days ago read as three days without a copy
+                if own and st.st_ctime_ns > st.st_mtime_ns:
+                    added = added_at(e.path)
+                    if added is not None and added > at:
+                        at = added
                 if not own:
                     under_moved += 1
                     if under_moved > cap:

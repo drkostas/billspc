@@ -75,6 +75,24 @@ def test_the_listing_is_what_changed(tree):
     assert scan.unsynced(listing) == 4
 
 
+@mac_only
+def test_a_copy_that_kept_its_time_counts_from_when_it_was_made(tmp_path):
+    g = tmp_path / "Drive"
+    start = mark()
+    src = put(g, "Projects/notes/CLAUDE.md", "the original")
+    kept = src.stat().st_mtime
+    time.sleep(1.2)
+    made = time.time()
+    copy = put(g, "Projects/notes/CLAUDE.md.bak", "the original")
+    os.utime(copy, (kept, kept))          # what cp -p and shutil.copy2 leave
+    listing = scan.changed_since(g, start, key="main")
+    got = {f["path"]: f for f in listing["files"]}
+    assert got["Projects/notes/CLAUDE.md"]["changed_at"] == pytest.approx(kept, abs=0.01)
+    b = got["Projects/notes/CLAUDE.md.bak"]
+    assert b["mtime"] == pytest.approx(kept, abs=0.01) and b["changed_at"] >= made - 0.05
+    assert scan.oldest_hours([b], made + 3600) == pytest.approx(1.0, abs=0.01)
+
+
 def test_a_missing_folder_says_so(tmp_path):
     listing = scan.changed_since(tmp_path / "nope", datetime.now(timezone.utc))
     assert listing["exists"] is False and listing["files"] == []
