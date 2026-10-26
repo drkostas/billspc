@@ -1,0 +1,30 @@
+name: Publish
+
+# Publishes to PyPI with trusted publishing (no stored token) when a tag like v0.1.0 is pushed.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    env:
+      RCLONE_RELEASE: "1.75.2"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install rclone
+        run: |
+          curl -fsSL -o rclone.zip "https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-amd64.zip"
+          unzip -q rclone.zip
+          sudo install "rclone-v${RCLONE_RELEASE}-linux-amd64/rclone" /usr/local/bin/rclone
+      - run: pip install build && pip install -e '.[test]'
+      - run: pytest -q
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
