@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - A file copied with its original time kept (`cp -p`, `rsync -t`, an unpacked archive) is counted from when it was put at its path, its date added, not from the old time it carries. Before this, a backup made today of a file changed three days ago read as three days without a copy
 - Every function that starts a program takes `env`, the whole environment that program gets. In `billspc.rclone` these are `run`, `popen`, `installed_version` and `version_ok`. In `billspc.consent` they are `MacKeychain` (its constructor, `has` and `add`), `proc_id`, `ours`, `spawn_command`, `rc` and every function that reaches them. `env=None` keeps the environment billspc builds, so existing callers see no change

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "billspc"
-version = "0.1.0"
+version = "0.2.0"
 description = "rclone-backed Google Drive sync and backup for a Mac: an allowlist before every rclone command, filter files, a supervised Google consent, an Insync migration and a changed-files scan"
 readme = "README.md"
 requires-python = ">=3.9"
