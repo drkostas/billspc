@@ -39,7 +39,7 @@ from billspc.files import read_json, write_json
 from billspc.filters import FilterSet
 
 __all__ = ["changed_since", "write_json", "read_json", "added_at", "unsynced", "oldest_hours",
-           "background", "MOVED_CAP"]
+           "background", "MOVED_CAP", "observe", "counted_from_sight"]
 
 #: how many files under moved folders one listing names
 MOVED_CAP = 20_000
@@ -207,6 +207,45 @@ def oldest_hours(files, now: float, moves: list[dict] | None = None) -> float:
     changes = [f.get("changed_at") or max(f["mtime"], f["ctime"]) for f in files]
     changes += [m.get("at") or m.get("ctime") for m in moves or () if (m.get("at") or m.get("ctime"))]
     return round(max(0.0, now - min(changes)) / 3600, 2) if changes else 0.0
+
+
+def observe(files, sights: dict | None, now: float) -> dict:
+    """Remember when each file was first seen without a checked copy, and return the new record
+    ({path: {"size", "mtime_ns", "first"}}), for the caller to keep between listings.
+
+    A file's own times say when its content last changed, not when it arrived: a file moved in, or
+    copied with its times kept, can carry an old time the moment it appears. A file seen before with
+    the same size and mtime keeps its first sight. One that changed since starts over, and one no
+    longer in `files` (copied and checked, or gone) is dropped, so it starts over if it returns."""
+    old = sights if isinstance(sights, dict) else {}
+    out: dict = {}
+    for f in files:
+        path = f.get("path")
+        if not isinstance(path, str):
+            continue
+        before = old.get(path)
+        if (isinstance(before, dict) and before.get("size") == f.get("size")
+                and before.get("mtime_ns") == f.get("mtime_ns")
+                and isinstance(before.get("first"), (int, float))):
+            out[path] = before
+        else:
+            out[path] = {"size": f.get("size"), "mtime_ns": f.get("mtime_ns"), "first": now}
+    return out
+
+
+def counted_from_sight(files, sights: dict, floor: float | None = None) -> list[dict]:
+    """The files with each one's `changed_at` moved to the later of its first sight (`observe`) and
+    `floor` (when the gap began), for `oldest_hours`. A change older than either is not counted from
+    its own time. A file with no sight yet is counted from its own change time, unchanged."""
+    out = []
+    for f in files:
+        s = (sights or {}).get(f.get("path"))
+        first = s.get("first") if isinstance(s, dict) else None
+        if not isinstance(first, (int, float)):
+            out.append(f)
+            continue
+        out.append({**f, "changed_at": max(first, floor) if floor is not None else first})
+    return out
 
 
 def background() -> dict:
