@@ -215,3 +215,65 @@ def test_moved_into_a_folder_renamed_after_it(tmp_path):
     (g / "A3/moved_then_renamed_inside").rename(g / "C3/moved_then_renamed_inside")
     (g / "C3").rename(g / "C3b")
     assert "C3b/moved_then_renamed_inside/old.txt" in names(scan.changed_since(g, start, remembered=[]))
+
+
+# ---- first sight: the age of a change runs from when a file was first seen without a copy
+
+DAY = 86400.0
+
+
+def _f(path="a.txt", mtime=0.0, size=5):
+    return {"path": path, "size": size, "mtime": mtime, "mtime_ns": int(mtime * 1e9),
+            "ctime": mtime, "changed_at": mtime}
+
+
+def _age(files, sights, now, floor=None):
+    return scan.oldest_hours(scan.counted_from_sight(files, sights, floor), now)
+
+
+def test_old_mtime_file_that_appears_now_reads_about_zero():
+    now = 100 * DAY
+    files = [_f(mtime=now - 9 * DAY)]
+    sights = scan.observe(files, {}, now)
+    assert _age(files, sights, now) == 0.0
+    assert scan.oldest_hours(files, now) == pytest.approx(9 * 24, abs=0.01)  # the file's own time
+
+
+def test_file_seen_unsynced_for_four_days_reads_four_days():
+    start = 100 * DAY
+    files = [_f(mtime=start - 9 * DAY)]
+    sights = scan.observe(files, {}, start)
+    for step in range(1, 17):  # every six hours
+        sights = scan.observe(files, sights, start + step * DAY / 4)
+    assert _age(files, sights, start + 4 * DAY) == pytest.approx(96.0, abs=0.01)
+
+
+def test_file_uploaded_then_changed_again_starts_over():
+    start = 100 * DAY
+    files = [_f(mtime=start - DAY)]
+    sights = scan.observe(files, {}, start)
+    sights = scan.observe([], sights, start + 2 * DAY)  # uploaded and checked: dropped
+    assert sights == {}
+    again = [_f(mtime=start - 5 * DAY)]  # back, with an old time
+    sights = scan.observe(again, sights, start + 3 * DAY)
+    assert _age(again, sights, start + 3 * DAY) == 0.0
+
+
+def test_file_changed_while_unsynced_starts_over():
+    start = 100 * DAY
+    sights = scan.observe([_f(mtime=start - DAY, size=5)], {}, start)
+    changed = [_f(mtime=start + DAY, size=6)]
+    sights = scan.observe(changed, sights, start + 2 * DAY)
+    assert _age(changed, sights, start + 2 * DAY) == 0.0
+
+
+def test_floor_is_the_gap_start_when_a_sight_is_older():
+    now = 100 * DAY
+    files = [_f(mtime=now - 9 * DAY)]
+    sights = {"a.txt": {"size": 5, "mtime_ns": int((now - 9 * DAY) * 1e9), "first": now - 30 * DAY}}
+    assert _age(files, sights, now, floor=now - 3 * DAY) == pytest.approx(72.0, abs=0.01)
+
+
+def test_file_without_a_sight_keeps_its_own_time():
+    now = 100 * DAY
+    assert _age([_f(mtime=now - DAY)], {}, now) == pytest.approx(24.0, abs=0.01)

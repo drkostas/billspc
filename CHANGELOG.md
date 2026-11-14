@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `scan.observe` and `scan.counted_from_sight` count the age of an unsynced change from when a file was first seen without a checked copy, not from the time it carries. A file moved in or copied with its times kept no longer reads as old the moment it appears. The record of first sights is a plain dict the caller keeps between listings
+
 ## 0.2.0
 
 - A file copied with its original time kept (`cp -p`, `rsync -t`, an unpacked archive) is counted from when it was put at its path, its date added, not from the old time it carries. Before this, a backup made today of a file changed three days ago read as three days without a copy
